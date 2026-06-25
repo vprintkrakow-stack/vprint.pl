@@ -7,15 +7,14 @@ import shutil
 import traceback
 
 app = Flask(__name__)
-
 CORS(app)
 
 def detect_spaces_from_text(text: str):
     t = text or ''
-    has_rgb = ('DeviceRGB' in t) or ('CalRGB' in t) or ('ICCBasedRGB' in t)
-    has_cmyk = ('DeviceCMYK' in t) or ('ICCBasedCMYK' in t)
+    has_rgb = ('DeviceRGB' in t) or ('CalRGB' in t)
+    has_cmyk = 'DeviceCMYK' in t
     has_spot = ('Separation' in t) or ('DeviceN' in t)
-    has_gray = ('DeviceGray' in t) or ('CalGray' in t) or ('ICCBasedGray' in t)
+    has_gray = ('DeviceGray' in t) or ('CalGray' in t)
 
     return {
         'has_rgb': has_rgb,
