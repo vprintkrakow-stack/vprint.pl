@@ -3,23 +3,19 @@ from flask_cors import CORS
 import tempfile
 import os
 import subprocess
+import json
 
 app = Flask(__name__)
 
-CORS(app, resources={
-    r"/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
-    }
-})
+CORS(app)
 
 def detect_spaces_from_text(text: str):
     t = text or ''
-    has_rgb = any(x in t for x in ['DeviceRGB', 'CalRGB'])
-    has_cmyk = 'DeviceCMYK' in t
-    has_spot = any(x in t for x in ['Separation', 'DeviceN'])
-    has_gray = any(x in t for x in ['DeviceGray', 'CalGray'])
+    has_rgb = ('DeviceRGB' in t) or ('CalRGB' in t) or ('ICCBasedRGB' in t)
+    has_cmyk = ('DeviceCMYK' in t) or ('ICCBasedCMYK' in t)
+    has_spot = ('Separation' in t) or ('DeviceN' in t)
+    has_gray = ('DeviceGray' in t) or ('CalGray' in t) or ('ICCBasedGray' in t)
+
     return {
         'has_rgb': has_rgb,
         'has_cmyk': has_cmyk,
@@ -27,28 +23,44 @@ def detect_spaces_from_text(text: str):
         'has_gray': has_gray,
     }
 
-@app.get('/')
+@app.route('/', methods=['GET'])
 def home():
     return jsonify({
         'ok': True,
         'service': 'pdf-color-check'
     })
 
-@app.route('/analyze-pdf', methods=['POST', 'OPTIONS'])
+@app.route('/analyze-pdf', methods=['GET', 'POST', 'OPTIONS'])
 def analyze_pdf():
+    if request.method == 'GET':
+        return jsonify({
+            'ok': True,
+            'message': 'Use POST with multipart/form-data and field name "file".'
+        })
+
     if request.method == 'OPTIONS':
         return ('', 204)
 
     if 'file' not in request.files:
-        return jsonify({'error': 'missing file'}), 400
+        return jsonify({
+            'ok': False,
+            'error': 'missing file',
+            'received_keys': list(request.files.keys())
+        }), 400
 
     f = request.files['file']
 
     if not f.filename:
-        return jsonify({'error': 'empty filename'}), 400
+        return jsonify({
+            'ok': False,
+            'error': 'empty filename'
+        }), 400
 
     if not f.filename.lower().endswith('.pdf'):
-        return jsonify({'error': 'file must be a PDF'}), 400
+        return jsonify({
+            'ok': False,
+            'error': 'file must be a PDF'
+        }), 400
 
     tmp_pdf = None
 
@@ -57,22 +69,29 @@ def analyze_pdf():
             f.save(pdf_tmp.name)
             tmp_pdf = pdf_tmp.name
 
-        cmd = ['qpdf', '--json', tmp_pdf]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(
+            ['qpdf', '--json', tmp_pdf],
+            capture_output=True,
+            text=True
+        )
 
         if result.returncode != 0:
             return jsonify({
+                'ok': False,
                 'error': 'qpdf failed',
-                'details': result.stderr.strip()
+                'stderr': result.stderr.strip()
             }), 500
 
-        text = result.stdout
-        spaces = detect_spaces_from_text(text)
+        spaces = detect_spaces_from_text(result.stdout)
 
-        return jsonify(spaces), 200
+        return jsonify({
+            'ok': True,
+            **spaces
+        })
 
     except Exception as e:
         return jsonify({
+            'ok': False,
             'error': 'server exception',
             'details': str(e)
         }), 500
