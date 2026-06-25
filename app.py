@@ -1,9 +1,18 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import tempfile
 import os
 import subprocess
 
 app = Flask(__name__)
+
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
 def detect_spaces_from_text(text: str):
     t = text or ''
@@ -20,18 +29,29 @@ def detect_spaces_from_text(text: str):
 
 @app.get('/')
 def home():
-    return jsonify({'ok': True, 'service': 'pdf-color-check'})
+    return jsonify({
+        'ok': True,
+        'service': 'pdf-color-check'
+    })
 
-@app.post('/analyze-pdf')
+@app.route('/analyze-pdf', methods=['POST', 'OPTIONS'])
 def analyze_pdf():
+    if request.method == 'OPTIONS':
+        return ('', 204)
+
     if 'file' not in request.files:
         return jsonify({'error': 'missing file'}), 400
 
     f = request.files['file']
+
+    if not f.filename:
+        return jsonify({'error': 'empty filename'}), 400
+
     if not f.filename.lower().endswith('.pdf'):
         return jsonify({'error': 'file must be a PDF'}), 400
 
     tmp_pdf = None
+
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as pdf_tmp:
             f.save(pdf_tmp.name)
@@ -48,7 +68,14 @@ def analyze_pdf():
 
         text = result.stdout
         spaces = detect_spaces_from_text(text)
-        return jsonify(spaces)
+
+        return jsonify(spaces), 200
+
+    except Exception as e:
+        return jsonify({
+            'error': 'server exception',
+            'details': str(e)
+        }), 500
 
     finally:
         if tmp_pdf and os.path.exists(tmp_pdf):
