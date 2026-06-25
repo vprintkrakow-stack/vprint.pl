@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: pdf-color-check
+    env: python
+    buildCommand: pip install -r requirements.txt && apt-get update && apt-get install -y qpdf
+    startCommand: gunicorn app:app
