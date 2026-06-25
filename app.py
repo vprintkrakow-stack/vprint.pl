@@ -3,7 +3,8 @@ from flask_cors import CORS
 import tempfile
 import os
 import subprocess
-import json
+import shutil
+import traceback
 
 app = Flask(__name__)
 
@@ -30,12 +31,24 @@ def home():
         'service': 'pdf-color-check'
     })
 
+@app.route('/health', methods=['GET'])
+def health():
+    qpdf_path = shutil.which('qpdf')
+    return jsonify({
+        'ok': True,
+        'qpdf_found': bool(qpdf_path),
+        'qpdf_path': qpdf_path
+    })
+
 @app.route('/analyze-pdf', methods=['GET', 'POST', 'OPTIONS'])
 def analyze_pdf():
     if request.method == 'GET':
+        qpdf_path = shutil.which('qpdf')
         return jsonify({
             'ok': True,
-            'message': 'Use POST with multipart/form-data and field name "file".'
+            'message': 'Use POST with multipart/form-data and field name "file".',
+            'qpdf_found': bool(qpdf_path),
+            'qpdf_path': qpdf_path
         })
 
     if request.method == 'OPTIONS':
@@ -62,6 +75,13 @@ def analyze_pdf():
             'error': 'file must be a PDF'
         }), 400
 
+    qpdf_path = shutil.which('qpdf')
+    if not qpdf_path:
+        return jsonify({
+            'ok': False,
+            'error': 'qpdf not found in PATH'
+        }), 500
+
     tmp_pdf = None
 
     try:
@@ -70,7 +90,7 @@ def analyze_pdf():
             tmp_pdf = pdf_tmp.name
 
         result = subprocess.run(
-            ['qpdf', '--json', tmp_pdf],
+            [qpdf_path, '--json', tmp_pdf],
             capture_output=True,
             text=True
         )
@@ -79,21 +99,24 @@ def analyze_pdf():
             return jsonify({
                 'ok': False,
                 'error': 'qpdf failed',
-                'stderr': result.stderr.strip()
+                'stderr': result.stderr.strip(),
+                'returncode': result.returncode
             }), 500
 
         spaces = detect_spaces_from_text(result.stdout)
 
         return jsonify({
             'ok': True,
+            'filename': f.filename,
             **spaces
-        })
+        }), 200
 
     except Exception as e:
         return jsonify({
             'ok': False,
             'error': 'server exception',
-            'details': str(e)
+            'details': str(e),
+            'trace': traceback.format_exc()
         }), 500
 
     finally:
