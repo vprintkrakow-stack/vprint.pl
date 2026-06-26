@@ -4,80 +4,135 @@ import tempfile
 import os
 import traceback
 import pikepdf
-from pikepdf import Name, Pdf, PdfImage
+from pikepdf import Pdf, PdfImage
 
 app = Flask(__name__)
 CORS(app)
 
-def normalize_name(value):
+def s(v):
     try:
-        return str(value)
+        return str(v)
     except Exception:
         return ''
 
-def inspect_colorspace_value(cs, found):
-    cs_str = normalize_name(cs)
+def add_token(found, token):
+    found['debug_tokens'].add(token)
+
+def mark_rgb(found, token):
+    found['has_rgb'] = True
+    add_token(found, token)
+
+def mark_spot(found, token):
+    found['has_spot'] = True
+    add_token(found, token)
+
+def inspect_icc_stream(icc_obj, found):
+    try:
+        n = icc_obj.get('/N', None)
+        alt = s(icc_obj.get('/Alternate', ''))
+
+        if n == 3:
+            mark_rgb(found, 'ICCBased(N=3)')
+        elif n == 4:
+            add_token(found, 'ICCBased(N=4)')
+        elif n == 1:
+            add_token(found, 'ICCBased(N=1)')
+        else:
+            add_token(found, 'ICCBased')
+
+        if '/DeviceRGB' in alt:
+            mark_rgb(found, 'ICC Alternate DeviceRGB')
+        elif alt:
+            add_token(found, f'ICC Alternate {alt}')
+    except Exception:
+        add_token(found, 'ICCBased(unreadable)')
+
+def inspect_colorspace(cs, found, pdf):
+    cs_str = s(cs)
 
     if not cs_str:
         return
 
-    if '/DeviceCMYK' in cs_str:
-        found['has_cmyk'] = True
-        found['debug_tokens'].add('DeviceCMYK')
+    if '/DeviceRGB' in cs_str:
+        mark_rgb(found, 'DeviceRGB')
 
-    if '/DeviceRGB' in cs_str or '/CalRGB' in cs_str:
-        found['has_rgb'] = True
-        found['debug_tokens'].add('DeviceRGB/CalRGB')
+    if '/CalRGB' in cs_str:
+        mark_rgb(found, 'CalRGB')
 
-    if '/DeviceGray' in cs_str or '/CalGray' in cs_str:
-        found['has_gray'] = True
-        found['debug_tokens'].add('DeviceGray/CalGray')
+    if '/Separation' in cs_str:
+        mark_spot(found, 'Separation')
 
-    if '/Separation' in cs_str or '/DeviceN' in cs_str:
-        found['has_spot'] = True
-        found['debug_tokens'].add('Separation/DeviceN')
+    if '/DeviceN' in cs_str:
+        mark_spot(found, 'DeviceN')
 
-    if '/ICCBased' in cs_str:
-        found['debug_tokens'].add('ICCBased')
-
-    if '/Indexed' in cs_str:
-        found['debug_tokens'].add('Indexed')
-
-def inspect_image_xobject(xobj, found):
     try:
-        pim = PdfImage(xobj)
-        cs = getattr(pim, 'colorspace', None)
-        if cs:
-            inspect_colorspace_value(cs, found)
+        if isinstance(cs, pikepdf.Array) and len(cs) > 0:
+            head = s(cs[0])
 
-        mode = getattr(pim, 'mode', None)
-        if mode == 'CMYK':
-            found['has_cmyk'] = True
-            found['debug_tokens'].add('image-mode-CMYK')
-        elif mode == 'RGB':
-            found['has_rgb'] = True
-            found['debug_tokens'].add('image-mode-RGB')
-        elif mode in ('L', '1', 'LA'):
-            found['has_gray'] = True
-            found['debug_tokens'].add('image-mode-GRAY')
+            if head == '/ICCBased' and len(cs) > 1:
+                inspect_icc_stream(cs[1], found)
+
+            elif head == '/Separation':
+                mark_spot(found, 'Separation(array)')
+                if len(cs) > 2:
+                    inspect_colorspace(cs[2], found, pdf)
+
+            elif head == '/DeviceN':
+                mark_spot(found, 'DeviceN(array)')
+                if len(cs) > 2:
+                    inspect_colorspace(cs[2], found, pdf)
+
+            elif head == '/Indexed' and len(cs) > 1:
+                add_token(found, 'Indexed')
+                inspect_colorspace(cs[1], found, pdf)
     except Exception:
         pass
 
+def inspect_image_xobject(xobj, found, pdf):
     try:
         if '/ColorSpace' in xobj:
-            inspect_colorspace_value(xobj['/ColorSpace'], found)
+            inspect_colorspace(xobj['/ColorSpace'], found, pdf)
     except Exception:
         pass
 
-def inspect_resources(resources, found):
+    try:
+        pim = PdfImage(xobj)
+
+        cs = getattr(pim, 'colorspace', None)
+        if cs:
+            inspect_colorspace(cs, found, pdf)
+
+        icc = getattr(pim, 'icc', None)
+        if icc is not None:
+            inspect_icc_stream(icc, found)
+
+        mode = getattr(pim, 'mode', None)
+        if mode == 'RGB':
+            mark_rgb(found, 'image-mode-RGB')
+    except Exception:
+        pass
+
+def inspect_resources(resources, found, pdf, visited=None):
     if not resources:
         return
+
+    if visited is None:
+        visited = set()
+
+    try:
+        objgen = getattr(resources, 'objgen', None)
+        if objgen:
+            if objgen in visited:
+                return
+            visited.add(objgen)
+    except Exception:
+        pass
 
     try:
         if '/ColorSpace' in resources:
             cs_dict = resources['/ColorSpace']
             for _, cs_val in cs_dict.items():
-                inspect_colorspace_value(cs_val, found)
+                inspect_colorspace(cs_val, found, pdf)
     except Exception:
         pass
 
@@ -85,21 +140,51 @@ def inspect_resources(resources, found):
         if '/XObject' in resources:
             xobjects = resources['/XObject']
             for _, xobj in xobjects.items():
-                subtype = normalize_name(xobj.get('/Subtype', ''))
+                subtype = s(xobj.get('/Subtype', ''))
+
                 if subtype == '/Image':
-                    inspect_image_xobject(xobj, found)
+                    inspect_image_xobject(xobj, found, pdf)
+
                 elif subtype == '/Form':
+                    add_token(found, 'FormXObject')
                     if '/Resources' in xobj:
-                        inspect_resources(xobj['/Resources'], found)
+                        inspect_resources(xobj['/Resources'], found, pdf, visited)
+    except Exception:
+        pass
+
+def inspect_page_content(page, found):
+    try:
+        contents = page.obj.get('/Contents', None)
+        if not contents:
+            return
+
+        streams = []
+        if isinstance(contents, pikepdf.Array):
+            streams.extend(list(contents))
+        else:
+            streams.append(contents)
+
+        for stream in streams:
+            try:
+                data = stream.read_bytes().decode('latin-1', errors='ignore')
+
+                if '/DeviceRGB' in data:
+                    mark_rgb(found, 'content-DeviceRGB')
+                if '/CalRGB' in data:
+                    mark_rgb(found, 'content-CalRGB')
+                if '/Separation' in data:
+                    mark_spot(found, 'content-Separation')
+                if '/DeviceN' in data:
+                    mark_spot(found, 'content-DeviceN')
+            except Exception:
+                continue
     except Exception:
         pass
 
 def analyze_pdf_colors(pdf_path):
     found = {
         'has_rgb': False,
-        'has_cmyk': False,
         'has_spot': False,
-        'has_gray': False,
         'debug_tokens': set()
     }
 
@@ -107,7 +192,8 @@ def analyze_pdf_colors(pdf_path):
         for page in pdf.pages:
             try:
                 resources = page.obj.get('/Resources', {})
-                inspect_resources(resources, found)
+                inspect_resources(resources, found, pdf)
+                inspect_page_content(page, found)
             except Exception:
                 continue
 
@@ -118,14 +204,14 @@ def analyze_pdf_colors(pdf_path):
 def home():
     return jsonify({
         'ok': True,
-        'service': 'pdf-color-check'
+        'service': 'pdf-rgb-spot-check'
     })
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
         'ok': True,
-        'service': 'pdf-color-check',
+        'service': 'pdf-rgb-spot-check',
         'engine': 'pikepdf'
     })
 
@@ -134,7 +220,7 @@ def analyze_pdf():
     if request.method == 'GET':
         return jsonify({
             'ok': True,
-            'message': 'Use POST with multipart/form-data and field name \"file\".'
+            'message': 'Use POST with multipart/form-data and field name "file".'
         })
 
     if request.method == 'OPTIONS':
@@ -174,9 +260,7 @@ def analyze_pdf():
             'ok': True,
             'filename': f.filename,
             'has_rgb': result['has_rgb'],
-            'has_cmyk': result['has_cmyk'],
             'has_spot': result['has_spot'],
-            'has_gray': result['has_gray'],
             'debug_tokens': result['debug_tokens']
         }), 200
 
