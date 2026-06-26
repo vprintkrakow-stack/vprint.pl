@@ -9,12 +9,23 @@ import traceback
 app = Flask(__name__)
 CORS(app)
 
+def find_qpdf():
+    candidates = [
+        shutil.which('qpdf'),
+        '/usr/bin/qpdf',
+        '/usr/local/bin/qpdf'
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
 def detect_spaces_from_text(text: str):
     t = text or ''
-    has_rgb = ('DeviceRGB' in t) or ('CalRGB' in t)
-    has_cmyk = 'DeviceCMYK' in t
+    has_rgb = ('DeviceRGB' in t) or ('CalRGB' in t) or ('ICCBasedRGB' in t)
+    has_cmyk = ('DeviceCMYK' in t) or ('ICCBasedCMYK' in t)
     has_spot = ('Separation' in t) or ('DeviceN' in t)
-    has_gray = ('DeviceGray' in t) or ('CalGray' in t)
+    has_gray = ('DeviceGray' in t) or ('CalGray' in t) or ('ICCBasedGray' in t)
 
     return {
         'has_rgb': has_rgb,
@@ -32,17 +43,20 @@ def home():
 
 @app.route('/health', methods=['GET'])
 def health():
-    qpdf_path = shutil.which('qpdf')
+    qpdf_path = find_qpdf()
     return jsonify({
         'ok': True,
         'qpdf_found': bool(qpdf_path),
-        'qpdf_path': qpdf_path
+        'qpdf_path': qpdf_path,
+        'path_env': os.environ.get('PATH'),
+        'usr_bin_qpdf_exists': os.path.exists('/usr/bin/qpdf'),
+        'usr_local_bin_qpdf_exists': os.path.exists('/usr/local/bin/qpdf')
     })
 
 @app.route('/analyze-pdf', methods=['GET', 'POST', 'OPTIONS'])
 def analyze_pdf():
     if request.method == 'GET':
-        qpdf_path = shutil.which('qpdf')
+        qpdf_path = find_qpdf()
         return jsonify({
             'ok': True,
             'message': 'Use POST with multipart/form-data and field name "file".',
@@ -74,11 +88,14 @@ def analyze_pdf():
             'error': 'file must be a PDF'
         }), 400
 
-    qpdf_path = shutil.which('qpdf')
+    qpdf_path = find_qpdf()
     if not qpdf_path:
         return jsonify({
             'ok': False,
-            'error': 'qpdf not found in PATH'
+            'error': 'qpdf not found in PATH',
+            'path_env': os.environ.get('PATH'),
+            'usr_bin_qpdf_exists': os.path.exists('/usr/bin/qpdf'),
+            'usr_local_bin_qpdf_exists': os.path.exists('/usr/local/bin/qpdf')
         }), 500
 
     tmp_pdf = None
